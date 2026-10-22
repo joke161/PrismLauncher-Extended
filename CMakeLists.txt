@@ -90,9 +90,8 @@ else()
         add_link_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wl,--stack,8388608>")
 
         # -ffunction-sections and -fdata-sections help reduce binary size
-        # -mguard=cf enables Control Flow Guard
         # TODO: Look into -gc-sections to further reduce binary size
-        add_compile_options("$<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<COMPILE_LANGUAGE:C,CXX>>:-ffunction-sections;-fdata-sections;-mguard=cf>")
+        add_compile_options("$<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<COMPILE_LANGUAGE:C,CXX>>:-ffunction-sections;-fdata-sections>")
     endif()
 endif()
 

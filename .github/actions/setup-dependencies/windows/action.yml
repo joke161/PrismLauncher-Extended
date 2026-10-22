@@ -72,6 +72,7 @@ runs:
           ccache:p
           cmake:p
           ninja:p
+          openssl:p
 
     - name: List pacman packages (MinGW)
       if: ${{ inputs.msystem != '' }}

@@ -12,7 +12,7 @@ runs:
         sudo apt-get -y install \
           dpkg-dev \
           ninja-build extra-cmake-modules pkg-config scdoc \
-          gamemode-dev libxcb-cursor-dev
+          gamemode-dev libxcb-cursor-dev libssl-dev
 
     - name: Setup AppImage tooling
       shell: bash

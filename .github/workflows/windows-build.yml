@@ -41,6 +41,7 @@ jobs:
           path-type: inherit
           install: >-
             git
+            mingw-w64-ucrt-x86_64-openssl
           pacboy: >-
             toolchain:p
             cmake:p
@@ -150,3 +151,4 @@ jobs:
         with:
           name: PrismLauncher-Extended-Windows-Portable
           path: install/
+
