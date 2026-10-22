@@ -1,0 +1,152 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - master
+      - develop
+  pull_request:
+    branches:
+      - master
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows Portable (x86_64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            pkgconf:p
+            qt6-base:p
+            qt6-5compat:p
+            qt6-imageformats:p
+            qt6-networkauth:p
+            qt6-svg:p
+            openssl:p
+            zlib:p
+            cmark:p
+            extra-cmake-modules:p
+            tomlplusplus:p
+            libarchive:p
+            qrencode:p
+
+      - name: Configure CMake
+        shell: msys2 {0}
+        run: |
+          EXTRA_CMAKE_ARGS=()
+          if [ -n "$JAVA_HOME" ]; then
+            JAVA_WIN=$(cygpath -m "$JAVA_HOME")
+            EXTRA_CMAKE_ARGS+=(
+              "-DJava_JAVA_EXECUTABLE=${JAVA_WIN}/bin/java.exe"
+              "-DJava_JAVAC_EXECUTABLE=${JAVA_WIN}/bin/javac.exe"
+            )
+          fi
+
+          cmake -B build -G Ninja \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D Launcher_BUILD_PLATFORM="Windows" \
+            -D Launcher_ENABLE_UPDATER=OFF \
+            -D BUILD_TESTING=OFF \
+            -D ENABLE_LTO=OFF \
+            -D CMAKE_INSTALL_PREFIX=install \
+            "${EXTRA_CMAKE_ARGS[@]}"
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          ninja -C build
+
+      - name: Install
+        shell: msys2 {0}
+        run: |
+          cmake --install build --prefix install
+
+      - name: Package Dependencies & Portable
+        shell: msys2 {0}
+        run: |
+          echo "=== Setting up Portable mode ==="
+          touch install/portable.txt
+          if [ -f program_info/portable.txt ]; then
+            cp -f program_info/portable.txt install/
+          fi
+
+          echo "=== Deploying Qt plugins and libraries ==="
+          MAIN_EXE=$(find install -maxdepth 1 -name "*.exe" | head -n 1)
+          if [ -n "$MAIN_EXE" ]; then
+            echo "Found main executable: $MAIN_EXE"
+            windeployqt --no-translations --no-compiler-runtime $(cygpath -w "$MAIN_EXE") || true
+          fi
+
+          echo "=== Copying MinGW / UCRT runtime DLLs ==="
+          copy_ucrt_dlls() {
+            for bin in $(find install -type f \( -name "*.exe" -o -name "*.dll" \)); do
+              for dll in $(ldd "$bin" 2>/dev/null | grep -i '/ucrt64/bin/' | awk '{print $3}'); do
+                if [ -f "$dll" ]; then
+                  cp -u "$dll" install/ 2>/dev/null || true
+                fi
+              done
+            done
+          }
+          # Resolve transitive DLL dependencies
+          copy_ucrt_dlls
+          copy_ucrt_dlls
+
+          # Explicitly guarantee GCC/MinGW compiler runtime and core DLLs are copied
+          for f in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll libcrypto-3-x64.dll libssl-3-x64.dll zlib1.dll; do
+            if [ -f "/ucrt64/bin/$f" ]; then
+              cp -u "/ucrt64/bin/$f" install/ || true
+            fi
+          done
+
+          echo "=== Ensuring authlib-injector.jar and launcher jars ==="
+          mkdir -p install/jars
+          if [ -f libraries/authlib-injector/authlib-injector.jar ]; then
+            cp -u libraries/authlib-injector/authlib-injector.jar install/jars/
+          fi
+          if [ -d build/jars ]; then
+            cp -u build/jars/*.jar install/jars/ 2>/dev/null || true
+          fi
+
+          echo "=== Ensuring qtlogging.ini ==="
+          if [ -f launcher/qtlogging.ini ]; then
+            cp -u launcher/qtlogging.ini install/
+          fi
+
+          echo "=== Verifying Packaging ==="
+          ls -la install/
+          ls -la install/jars/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrismLauncher-Extended-Windows-Portable
+          path: install/
