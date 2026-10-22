@@ -1,0 +1,761 @@
+// SPDX-License-Identifier: GPL-3.0-only
+/*
+ *  Prism Launcher - Minecraft Launcher
+ *  Copyright (c) 2022 flowln <flowlnlnln@gmail.com>
+ *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
+ *  Copyright (c) 2023 Trial97 <alexandru.tripon97@gmail.com>
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, version 3.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * This file incorporates work covered by the following copyright and
+ * permission notice:
+ *
+ *      Copyright 2013-2021 MultiMC Contributors
+ *
+ *      Licensed under the Apache License, Version 2.0 (the "License");
+ *      you may not use this file except in compliance with the License.
+ *      You may obtain a copy of the License at
+ *
+ *          http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *      Unless required by applicable law or agreed to in writing, software
+ *      distributed under the License is distributed on an "AS IS" BASIS,
+ *      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *      See the License for the specific language governing permissions and
+ *      limitations under the License.
+ */
+
+#include "ModFolderModel.h"
+
+#include <FileSystem.h>
+#include <QAbstractButton>
+#include <QDebug>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
+#include <QHeaderView>
+#include <QIcon>
+#include <QMimeData>
+#include <QString>
+#include <QStyle>
+#include <QThreadPool>
+#include <QUrl>
+#include <QUuid>
+#include <algorithm>
+#include <set>
+
+#include "minecraft/mod/Resource.h"
+#include "minecraft/mod/ResourceFolderModel.h"
+#include "minecraft/mod/tasks/LocalModParseTask.h"
+#include "modplatform/ModIndex.h"
+#include "ui/dialogs/CustomMessageBox.h"
+#include "tools/diagnostics/ModAuditor.h"
+#include "tools/diagnostics/DiagI18n.h"
+
+namespace {
+static const QIcon& iconTrusted() {
+    static const QIcon icon = QIcon::fromTheme("security-high", QIcon::fromTheme("emblem-favorite"));
+    return icon;
+}
+static const QIcon& iconDangerous() {
+    static const QIcon icon = QIcon::fromTheme("dialog-error", QIcon::fromTheme("status-bad"));
+    return icon;
+}
+static const QIcon& iconWarning() {
+    static const QIcon icon = QIcon::fromTheme("dialog-warning", QIcon::fromTheme("status-yellow"));
+    return icon;
+}
+static const QIcon& iconNotice() {
+    static const QIcon icon = QIcon::fromTheme("dialog-information", QIcon::fromTheme("status-yellow"));
+    return icon;
+}
+static const QIcon& iconSafe() {
+    static const QIcon icon = QIcon::fromTheme("security-high", QIcon::fromTheme("status-good"));
+    return icon;
+}
+static const QIcon& iconNotScanned() {
+    static const QIcon icon = QIcon::fromTheme("security-low");
+    return icon;
+}
+
+static const QBrush s_brushTrusted(QColor("#3498db"));
+static const QBrush s_brushDangerous(QColor("#dc3545"));
+static const QBrush s_brushWarning(QColor("#e67e22"));
+static const QBrush s_brushSafe(QColor("#28a745"));
+static const QBrush s_brushNotScanned(QColor("#888888"));
+} // namespace
+
+ModFolderModel::ModFolderModel(const QDir& dir, MinecraftInstance* instance, bool isIndexed, bool createDir, QObject* parent)
+    : ResourceFolderModel(QDir(dir), instance, isIndexed, createDir, parent)
+{
+    m_columnNames = QStringList({ "Enable", "Name", "Version", "Last Modified", "Provider", "Size", "Side", "Loaders", "Minecraft Versions",
+                                  "Release Type", "Requires", "Required By", "File Name", "Update", "Security" });
+    m_columnNamesTranslated =
+        QStringList({ "", tr("Name"), tr("Version"), tr("Last Modified"), tr("Provider"), tr("Size"), tr("Side"), tr("Loaders"),
+                      tr("Minecraft Versions"), tr("Release Type"), tr("Requires"), tr("Required By"), tr("File Name"), tr("Update"),
+                      DiagI18n::tr("Security", "Безопасность") });
+    m_columnSortKeys = { SortType::Enabled,  SortType::Name,       SortType::Version,  SortType::Date,       SortType::Provider,
+                         SortType::Size,     SortType::Side,       SortType::Loaders,  SortType::McVersions, SortType::ReleaseType,
+                         SortType::Requires, SortType::RequiredBy, SortType::Filename, SortType::LockUpdate, SortType::Security };
+    m_columnResizeModes = { QHeaderView::Fixed,       QHeaderView::Stretch,     QHeaderView::Interactive, QHeaderView::ResizeToContents,
+                            QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::Interactive,
+                            QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::Interactive,
+                            QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::ResizeToContents };
+    m_columnsHideable = { false, false, true, true, true, true, true, true, true, true, true, true, true, true, true };
+
+    m_dir.setFilter(QDir::Readable | QDir::NoDotAndDotDot | QDir::Files);
+
+    connect(this, &ModFolderModel::parseFinished, this, &ModFolderModel::onParseFinished);
+}
+
+QVariant ModFolderModel::data(const QModelIndex& index, int role) const
+{
+    if (!validateIndex(index)) {
+        return {};
+    }
+
+    int row = index.row();
+    int column = index.column();
+
+    switch (role) {
+        case Qt::BackgroundRole:
+            return rowBackground(row);
+        case Qt::DisplayRole:
+            switch (column) {
+                case VersionColumn: {
+                    switch (at(row).type()) {
+                        case ResourceType::SINGLEFILE:
+                            return tr("File");
+                        default:
+                            return at(row).version();
+                    }
+                }
+                case SideColumn: {
+                    return at(row).side();
+                }
+                case LoadersColumn: {
+                    return at(row).loaders();
+                }
+                case McVersionsColumn: {
+                    return at(row).mcVersionsString();
+                }
+                case ReleaseTypeColumn: {
+                    return at(row).releaseType();
+                }
+                case RequiredByColumn: {
+                    return at(row).requiredByCount();
+                }
+                case RequiresColumn: {
+                    return at(row).requiresCount();
+                }
+                case SecurityColumn: {
+                    QString path = at(row).fileinfo().absoluteFilePath();
+                    if (ModAuditor::isModTrusted(path)) {
+                        return DiagI18n::tr("Trusted", "Доверенный");
+                    }
+                    if (ModAuditor::hasCachedReport(path)) {
+                        auto report = ModAuditor::getCachedReport(path);
+                        if (report.riskScore >= 80) {
+                            return QString("%1: %2/100").arg(DiagI18n::tr("Dangerous", "Опасно")).arg(report.riskScore);
+                        } else if (report.riskScore >= 40) {
+                            return QString("%1: %2/100").arg(DiagI18n::tr("Warning", "Внимание")).arg(report.riskScore);
+                        } else {
+                            return DiagI18n::tr("Safe", "Безопасно");
+                        }
+                    }
+                    return DiagI18n::tr("Not scanned", "Не проверен");
+                }
+                default:
+                    break;
+            }
+            break;
+        case Qt::ForegroundRole: {
+            if (column == SecurityColumn) {
+                QString path = at(row).fileinfo().absoluteFilePath();
+                if (ModAuditor::isModTrusted(path)) {
+                    return s_brushTrusted;
+                }
+                if (ModAuditor::hasCachedReport(path)) {
+                    auto report = ModAuditor::getCachedReport(path);
+                    if (report.riskScore >= 80) {
+                        return s_brushDangerous;
+                    } else if (report.riskScore >= 40) {
+                        return s_brushWarning;
+                    } else {
+                        return s_brushSafe;
+                    }
+                }
+                return s_brushNotScanned;
+            }
+            break;
+        }
+        case Qt::DecorationRole: {
+            if (column == SecurityColumn) {
+                QString path = at(row).fileinfo().absoluteFilePath();
+                if (ModAuditor::isModTrusted(path)) {
+                    return iconTrusted();
+                }
+                if (ModAuditor::hasCachedReport(path)) {
+                    auto report = ModAuditor::getCachedReport(path);
+                    if (report.riskScore >= 80) {
+                        return iconDangerous();
+                    } else if (report.riskScore >= 40) {
+                        return iconWarning();
+                    } else {
+                        return iconSafe();
+                    }
+                }
+                return iconNotScanned();
+            }
+            break;
+        }
+        case Qt::ToolTipRole:
+            switch (column) {
+                case SecurityColumn: {
+                    QString path = at(row).fileinfo().absoluteFilePath();
+                    bool trusted = ModAuditor::isModTrusted(path);
+                    QString tip;
+                    if (trusted) {
+                        tip = QString("%1: %2\n• %3")
+                            .arg(DiagI18n::tr("Security Status", "Статус безопасности"))
+                            .arg(DiagI18n::tr("Trusted (Exception)", "Доверенный (Исключение)"))
+                            .arg(DiagI18n::tr("This mod is added to exceptions and is ignored by threat alerts.",
+                                             "Этот мод добавлен в исключения и игнорируется предупреждениями об угрозах."));
+                    } else if (ModAuditor::hasCachedReport(path)) {
+                        auto report = ModAuditor::getCachedReport(path);
+                        tip = QString("%1: %2 (%3: %4/100)")
+                            .arg(DiagI18n::tr("Security Status", "Статус безопасности"))
+                            .arg(ModAuditor::verdictToString(report.verdict))
+                            .arg(DiagI18n::tr("Risk", "Риск"))
+                            .arg(report.riskScore);
+                        if (!report.findings.isEmpty()) {
+                            tip += QString("\n• %1: %2").arg(DiagI18n::tr("Potential issues detected", "Обнаружено замечаний")).arg(report.findings.size());
+                        }
+                    } else {
+                        tip = DiagI18n::tr("Mod has not been scanned yet.", "Мод ещё не был проверен.");
+                    }
+                    tip += QString("\n\n%1").arg(DiagI18n::tr("Click or right-click to view detailed security audit.",
+                                                             "Нажмите или используйте ПКМ для просмотра подробного отчёта безопасности."));
+                    return tip;
+                }
+                case RequiredByColumn: {
+                    const auto list = requiredByList(at(row).modId());
+                    if (!list.isEmpty()) {
+                        return list.join(QLatin1Char('\n'));
+                    }
+                    break;
+                }
+                case RequiresColumn: {
+                    const auto list = requiresList(at(row).modId());
+                    if (!list.isEmpty()) {
+                        return list.join(QLatin1Char('\n'));
+                    }
+                    break;
+                }
+                case NameColumn: {
+                    QString baseTip = ResourceFolderModel::data(index.siblingAtColumn(ResourceFolderModel::NameColumn), role).toString();
+                    QString path = at(row).fileinfo().absoluteFilePath();
+                    if (ModAuditor::hasCachedReport(path)) {
+                        auto report = ModAuditor::getCachedReport(path);
+                        QString secTip = QString("%1: %2 (%3: %4/100)")
+                                             .arg(DiagI18n::tr("Security Status", "Статус безопасности"))
+                                             .arg(ModAuditor::verdictToString(report.verdict))
+                                             .arg(DiagI18n::tr("Risk", "Риск"))
+                                             .arg(report.riskScore);
+                        if (!report.findings.isEmpty()) {
+                            secTip += QString("\n• %1: %2").arg(DiagI18n::tr("Potential issues detected", "Обнаружено замечаний")).arg(report.findings.size());
+                        }
+                        return baseTip.isEmpty() ? secTip : (baseTip + "\n\n" + secTip);
+                    }
+                    return baseTip;
+                }
+                default:
+                    break;
+            }
+            break;
+        case Qt::CheckStateRole:
+            if (column == ActiveColumn) {
+                return at(row).enabled() ? Qt::Checked : Qt::Unchecked;
+            }
+            return {};
+        case Qt::UserRole:
+            if (column == LockUpdateColumn) {
+                return at(row).lockUpdate();
+            }
+            return {};
+        default:
+            break;
+    }
+
+    // map the columns to the base equivilents
+    QModelIndex mappedIndex;
+    switch (column) {
+        case ActiveColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::ActiveColumn);
+            break;
+        case NameColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::NameColumn);
+            break;
+        case DateColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::DateColumn);
+            break;
+        case ProviderColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::ProviderColumn);
+            break;
+        case SizeColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::SizeColumn);
+            break;
+        case FileNameColumn:
+            mappedIndex = index.siblingAtColumn(ResourceFolderModel::FileNameColumn);
+            break;
+        default:
+            break;
+    }
+
+    if (mappedIndex.isValid()) {
+        return ResourceFolderModel::data(mappedIndex, role);
+    }
+
+    return {};
+}
+
+namespace {
+QIcon fallbackIcon(ModPlatform::ModLoaderType type)
+{
+    switch (type) {
+        default:
+            return QIcon::fromTheme("loadermods");
+        case ModPlatform::ModLoaderType::NeoForge:
+            return QIcon::fromTheme("neoforged");
+        case ModPlatform::ModLoaderType::Forge:
+            return QIcon::fromTheme("forge");
+        case ModPlatform::ModLoaderType::LiteLoader:
+            return QIcon::fromTheme("liteloader");
+        case ModPlatform::ModLoaderType::Fabric:
+            return QIcon::fromTheme("fabricmc");
+        case ModPlatform::ModLoaderType::Quilt:
+            return QIcon::fromTheme("quiltmc");
+    }
+}
+};  // namespace
+
+QList<MultiDecorationItemDelegate::Icon> ModFolderModel::icons(int row) const
+{
+    auto result = ResourceFolderModel::icons(row);
+    static const QSize s_iconSize = { 32, 32 };
+
+    if (m_showImages) {
+        const auto& mod = at(row);
+
+        QIcon icon;
+        if (const auto pixmap = mod.icon(s_iconSize, Qt::KeepAspectRatio); pixmap.isNull()) {
+            icon = fallbackIcon(mod.details().loader);
+        } else {
+            icon = pixmap;
+        }
+
+        result.prepend({ .icon = icon, .size = s_iconSize });
+    }
+
+    const auto& mod = at(row);
+    QString path = mod.fileinfo().absoluteFilePath();
+    if (ModAuditor::isModTrusted(path)) {
+        result.append({ .icon = iconTrusted(), .size = { 16, 16 } });
+    } else if (ModAuditor::hasCachedReport(path)) {
+        auto report = ModAuditor::getCachedReport(path);
+        switch (report.verdict) {
+            case AuditVerdict::Dangerous:
+                result.append({ .icon = iconDangerous(), .size = { 16, 16 } });
+                break;
+            case AuditVerdict::Suspicious:
+                result.append({ .icon = iconWarning(), .size = { 16, 16 } });
+                break;
+            case AuditVerdict::Notice:
+                result.append({ .icon = iconNotice(), .size = { 16, 16 } });
+                break;
+            case AuditVerdict::Clean:
+            default:
+                result.append({ .icon = iconSafe(), .size = { 16, 16 } });
+                break;
+        }
+    }
+
+    return result;
+}
+
+QVariant ModFolderModel::headerData(int section, [[maybe_unused]] Qt::Orientation orientation, int role) const
+{
+    switch (role) {
+        case Qt::DisplayRole:
+            switch (section) {
+                case ActiveColumn:
+                case NameColumn:
+                case VersionColumn:
+                case DateColumn:
+                case ProviderColumn:
+                case SideColumn:
+                case LoadersColumn:
+                case McVersionsColumn:
+                case ReleaseTypeColumn:
+                case SizeColumn:
+                case RequiredByColumn:
+                case RequiresColumn:
+                case FileNameColumn:
+                case LockUpdateColumn:
+                case SecurityColumn:
+                    return columnNames().at(section);
+                default:
+                    return QVariant();
+            }
+
+        case Qt::ToolTipRole:
+            switch (section) {
+                case ActiveColumn:
+                    return tr("Is the mod enabled?");
+                case NameColumn:
+                    return tr("The name of the mod.");
+                case VersionColumn:
+                    return tr("The version of the mod.");
+                case DateColumn:
+                    return tr("The date and time this mod was last changed (or added).");
+                case ProviderColumn:
+                    return tr("The source provider of the mod.");
+                case SideColumn:
+                    return tr("On what environment the mod is running.");
+                case LoadersColumn:
+                    return tr("The mod loader.");
+                case McVersionsColumn:
+                    return tr("The supported minecraft versions.");
+                case ReleaseTypeColumn:
+                    return tr("The release type.");
+                case SizeColumn:
+                    return tr("The size of the mod.");
+                case RequiredByColumn:
+                    return tr("For each mod, the number of other mods which depend on it.");
+                case RequiresColumn:
+                    return tr("For each mod, the number of other mods it depends on.");
+                case FileNameColumn:
+                    return tr("The file name of the mod.");
+                case LockUpdateColumn:
+                    return tr("Should this mod be updated?");
+                case SecurityColumn:
+                    return DiagI18n::tr("Mod security assessment and malware scan status. Click to open audit report.",
+                                        "Оценка безопасности мода и статус проверки на вирусы. Нажмите для открытия отчета.");
+                default:
+                    return QVariant();
+            }
+        default:
+            return QVariant();
+    }
+}
+
+int ModFolderModel::columnCount(const QModelIndex& parent) const
+{
+    return parent.isValid() ? 0 : NumColumns;
+}
+
+Task* ModFolderModel::createParseTask(Resource& resource)
+{
+    return new LocalModParseTask(m_nextResolutionTicket, resource.type(), resource.fileinfo());
+}
+
+bool ModFolderModel::isValid()
+{
+    return m_dir.exists() && m_dir.isReadable();
+}
+
+void ModFolderModel::onParseSucceeded(int ticket, const QString& resourceId)
+{
+    auto iter = m_activeParseTasks.constFind(ticket);
+    if (iter == m_activeParseTasks.constEnd()) {
+        return;
+    }
+
+    int row = m_resourcesIndex[resourceId];
+
+    const auto& parseTask = *iter;
+    auto* castTask = static_cast<LocalModParseTask*>(parseTask.get());
+
+    Q_ASSERT(castTask->token() == ticket);
+
+    auto resource = find(resourceId);
+
+    auto result = castTask->result();
+    if (result && resource) {
+        auto* mod = static_cast<Mod*>(resource.get());
+        mod->finishResolvingWithDetails(std::move(result->details));
+    }
+    emit dataChanged(index(row, RequiresColumn), index(row, RequiredByColumn));
+}
+
+namespace {
+Mod* findById(QSet<Mod*> mods, const QString& resourceId)
+{
+    auto found = std::ranges::find_if(mods, [resourceId](Mod* m) { return m->modId() == resourceId; });
+    return found != mods.end() ? *found : nullptr;
+}
+}  // namespace
+
+void ModFolderModel::onParseFinished()
+{
+    if (hasPendingParseTasks()) {
+        return;
+    }
+    auto modsList = allMods();
+    auto mods = QSet(modsList.begin(), modsList.end());
+
+    m_requires.clear();
+    m_requiredBy.clear();
+
+    auto findByProjectID = [mods](const QVariant& modId, ModPlatform::ResourceProvider provider) -> Mod* {
+        auto found = std::ranges::find_if(mods, [modId, provider](Mod* m) {
+            return m->metadata() && m->metadata()->provider == provider && m->metadata()->projectId == modId;
+        });
+        return found != mods.end() ? *found : nullptr;
+    };
+    for (auto* mod : mods) {
+        auto id = mod->modId();
+        for (const auto& dep : mod->dependencies()) {
+            auto* d = findById(mods, dep);
+            if (d) {
+                m_requires[id] << d;
+                m_requiredBy[d->modId()] << mod;
+            }
+        }
+        if (mod->metadata()) {
+            for (const auto& dep : mod->metadata()->dependencies) {
+                if (dep.type == ModPlatform::DependencyType::REQUIRED) {
+                    auto* d = findByProjectID(dep.addonId, mod->metadata()->provider);
+                    if (d) {
+                        m_requires[id] << d;
+                        m_requiredBy[d->modId()] << mod;
+                    }
+                }
+            }
+        }
+    }
+    for (auto* mod : mods) {
+        auto id = mod->modId();
+        if (mod->requiredByCount() != m_requiredBy[id].count() || mod->requiresCount() != m_requires[id].count()) {
+            mod->setRequiredByCount(static_cast<int>(m_requiredBy[id].count()));
+            mod->setRequiresCount(static_cast<int>(m_requires[id].count()));
+            int row = m_resourcesIndex[mod->internalId()];
+            emit dataChanged(index(row), index(row, columnCount(QModelIndex()) - 1));
+        }
+    }
+}
+
+namespace {
+
+QSet<Mod*> collectMods(const QSet<Mod*>& mods, QHash<QString, QSet<Mod*>> relation, std::set<QString>& seen, bool shouldBeEnabled)
+{
+    QSet<Mod*> affectedList = {};
+    QSet<Mod*> needToCheck = {};
+    for (auto* mod : mods) {
+        auto id = mod->modId();
+        if (!seen.contains(id)) {
+            seen.insert(id);
+            for (auto* affected : relation[id]) {
+                auto affectedId = affected->modId();
+
+                if (findById(mods, affectedId) == nullptr && !seen.contains(affectedId)) {
+                    if (shouldBeEnabled != affected->enabled()) {
+                        affectedList << affected;
+                    }
+                    needToCheck << affected;
+                }
+            }
+        }
+    }
+    // collect the affected mods until all of them are included in the list
+    if (!needToCheck.isEmpty()) {
+        affectedList += collectMods(needToCheck, relation, seen, shouldBeEnabled);
+    }
+    return affectedList;
+}
+}  // namespace
+
+QModelIndexList ModFolderModel::getAffectedMods(const QModelIndexList& indexes, EnableAction action)
+{
+    if (indexes.isEmpty()) {
+        return {};
+    }
+
+    QModelIndexList affectedList = {};
+    auto affectedModsList = selectedMods(indexes);
+    auto affectedMods = QSet(affectedModsList.begin(), affectedModsList.end());
+    std::set<QString> seen;
+
+    switch (action) {
+        case EnableAction::ENABLE: {
+            affectedMods = collectMods(affectedMods, m_requires, seen, true);
+            break;
+        }
+        case EnableAction::DISABLE: {
+            affectedMods = collectMods(affectedMods, m_requiredBy, seen, false);
+            break;
+        }
+        case EnableAction::TOGGLE: {
+            return {};  // this function should not be called with TOGGLE
+        }
+    }
+    for (auto* affected : affectedMods) {
+        auto affectedId = affected->modId();
+        auto row = m_resourcesIndex[affected->internalId()];
+        affectedList << index(row, 0);
+    }
+    return affectedList;
+}
+
+bool ModFolderModel::setResourceEnabled(const QModelIndexList& indexes, EnableAction action)
+{
+    if (indexes.isEmpty()) {
+        return {};
+    }
+
+    auto indexedModsList = selectedMods(indexes);
+    auto indexedMods = QSet(indexedModsList.begin(), indexedModsList.end());
+
+    QSet<Mod*> toEnable = {};
+    QSet<Mod*> toDisable = {};
+    std::set<QString> seen;
+
+    switch (action) {
+        case EnableAction::ENABLE: {
+            toEnable = indexedMods;
+            break;
+        }
+        case EnableAction::DISABLE: {
+            toDisable = indexedMods;
+            break;
+        }
+        case EnableAction::TOGGLE: {
+            for (auto* mod : indexedMods) {
+                if (mod->enabled()) {
+                    toDisable << mod;
+                } else {
+                    toEnable << mod;
+                }
+            }
+            break;
+        }
+    }
+
+    auto requiredToEnable = collectMods(toEnable, m_requires, seen, true);
+    auto requiredToDisable = collectMods(toDisable, m_requiredBy, seen, false);
+
+    toDisable.removeIf([toEnable](Mod* m) { return toEnable.contains(m); });
+    auto toList = [this](const QSet<Mod*>& mods) {
+        QModelIndexList list;
+        for (auto* mod : mods) {
+            auto row = m_resourcesIndex[mod->internalId()];
+            list << index(row, 0);
+        }
+        return list;
+    };
+
+    if (!requiredToEnable.isEmpty() || !requiredToDisable.isEmpty()) {
+        const QString title = tr("Confirm toggle");
+        const QString noButton = tr("Only Toggle Selected");
+        const QString yesButton = tr("Toggle Required Mods");
+
+        QString message = tr("Toggling these mod(s) will cause changes to other mods.\n");
+        QString details;
+        if (!requiredToEnable.isEmpty()) {
+            message += tr("%n mod(s) will be enabled\n", "", requiredToEnable.size());
+            details += tr("The following mods will be enabled:");
+            for (const auto* mod : requiredToEnable) {
+                details += QString("\n- %1 (%2)").arg(mod->name(), mod->internalId());
+            }
+        }
+        if (!requiredToDisable.isEmpty()) {
+            message += tr("%n mod(s) will be disabled\n", "", requiredToDisable.size());
+            if (!details.isEmpty()) {
+                details += "\n\n";
+            }
+            details += tr("The following mods will be disabled:");
+            for (const auto* mod : requiredToDisable) {
+                details += QString("\n- %1 (%2)").arg(mod->name(), mod->internalId());
+            }
+        }
+        message += tr("Do you want to automatically apply these related changes?\nIgnoring them may break the game.");
+
+        auto* box = CustomMessageBox::selectable(nullptr, title, message, QMessageBox::Warning,
+                                                 QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::No);
+        box->button(QMessageBox::No)->setText(noButton);
+        box->button(QMessageBox::Yes)->setText(yesButton);
+        box->setDetailedText(details);
+
+        auto response = box->exec();
+
+        if (response == QMessageBox::Yes) {
+            toEnable |= requiredToEnable;
+            toDisable |= requiredToDisable;
+        } else if (response == QMessageBox::Cancel) {
+            return false;
+        }
+    }
+
+    auto disableStatus = ResourceFolderModel::setResourceEnabled(toList(toDisable), EnableAction::DISABLE);
+    auto enableStatus = ResourceFolderModel::setResourceEnabled(toList(toEnable), EnableAction::ENABLE);
+    return disableStatus && enableStatus;
+}
+
+namespace {
+QStringList reqToList(const QSet<Mod*>& l)
+{
+    QStringList req;
+    for (auto* m : l) {
+        req << m->name();
+    }
+    return req;
+}
+}  // namespace
+
+QStringList ModFolderModel::requiresList(const QString& id) const
+{
+    return reqToList(m_requires.value(id));
+}
+
+QStringList ModFolderModel::requiredByList(const QString& id) const
+{
+    return reqToList(m_requiredBy.value(id));
+}
+
+bool ModFolderModel::deleteResources(const QModelIndexList& indexes)
+{
+    auto deleteInvalid = [](QSet<Mod*>& mods) {
+        for (auto it = mods.begin(); it != mods.end();) {
+            auto* mod = *it;
+            // the QFileInfo::exists is used instead of mod->fileinfo().exists
+            // because the later somehow caches that the file exists
+            if (!mod || !QFileInfo::exists(mod->fileinfo().absoluteFilePath())) {
+                it = mods.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+    auto res = ResourceFolderModel::deleteResources(indexes);
+    for (auto* mod : allMods()) {
+        auto id = mod->modId();
+        deleteInvalid(m_requiredBy[id]);
+        deleteInvalid(m_requires[id]);
+        if (mod->requiredByCount() != m_requiredBy[id].count() || mod->requiresCount() != m_requires[id].count()) {
+            mod->setRequiredByCount(static_cast<int>(m_requiredBy[id].count()));
+            mod->setRequiresCount(static_cast<int>(m_requires[id].count()));
+            int row = m_resourcesIndex[mod->internalId()];
+            emit dataChanged(index(row, RequiresColumn), index(row, RequiredByColumn));
+        }
+    }
+    return res;
+}
