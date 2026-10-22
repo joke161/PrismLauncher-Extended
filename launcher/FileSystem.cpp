@@ -60,8 +60,12 @@
 #include "StringUtils.h"
 
 #if defined Q_OS_WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <objidl.h>
 #include <shlguid.h>
 #include <shobjidl.h>

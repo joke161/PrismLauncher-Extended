@@ -229,7 +229,7 @@ set(Launcher_SUBREDDIT_URL "https://prismlauncher.org/reddit" CACHE STRING "URL 
 # Builds
 set(Launcher_QT_VERSION_MAJOR "6" CACHE STRING "Major Qt version to build against")
 
-option(Launcher_USE_PCH "Use precompiled headers where possible" ON)
+option(Launcher_USE_PCH "Use precompiled headers where possible" OFF)
 
 # Java downloader
 set(Launcher_ENABLE_JAVA_DOWNLOADER_DEFAULT ON)

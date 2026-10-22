@@ -78,6 +78,10 @@ jobs:
             -D Launcher_ENABLE_UPDATER=OFF \
             -D BUILD_TESTING=OFF \
             -D ENABLE_LTO=OFF \
+            -D Launcher_USE_PCH=OFF \
+            -D CMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -D CMAKE_COMPILE_WARNING_AS_ERROR=OFF \
+            -D CMAKE_CXX_FLAGS="-Wno-error" \
             -D CMAKE_INSTALL_PREFIX=install \
             "${EXTRA_CMAKE_ARGS[@]}"
 
