@@ -18,12 +18,6 @@ AssetUpdateTask::AssetUpdateTask(MinecraftInstance* inst)
 
 void AssetUpdateTask::executeTask()
 {
-    if (m_inst && m_inst->isOfflineLaunch()) {
-        qDebug() << m_inst->name() << ": offline launch mode, skipping asset index download";
-        emitSucceeded();
-        return;
-    }
-
     setStatus(tr("Updating assets index..."));
     auto components = m_inst->getPackProfile();
     auto profile = components->getProfile();
@@ -91,11 +85,6 @@ void AssetUpdateTask::assetIndexFinished()
 
     auto job = index.getDownloadJob();
     if (job) {
-        if (m_inst && m_inst->isOfflineLaunch()) {
-            qDebug() << m_inst->name() << ": offline launch mode, skipping asset files download";
-            emitSucceeded();
-            return;
-        }
         QString resourceURL = resourceUrl();
         QString source = tr("Mojang");
         if (resourceURL != BuildConfig.DEFAULT_RESOURCE_BASE) {

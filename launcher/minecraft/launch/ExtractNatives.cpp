@@ -63,17 +63,21 @@ static Result<> unzipNatives(QString source, QString targetFolder, bool applyJni
 void ExtractNatives::executeTask()
 {
     auto instance = m_parent->instance();
+    auto outputPath = instance->getNativePath();
+    QDir().mkpath(outputPath);
+
     auto toExtract = instance->getNativeJars();
     if (toExtract.isEmpty()) {
         emitSucceeded();
         return;
     }
 
-    auto outputPath = instance->getNativePath();
-    FS::ensureFolderPathExists(outputPath);
     auto javaVersion = instance->getJavaVersion();
     bool jniHackEnabled = javaVersion.major() >= 8;
     for (const auto& source : toExtract) {
+        if (!QFile::exists(source)) {
+            continue;
+        }
         if (const auto result = unzipNatives(source, outputPath, jniHackEnabled); !result) {
             const char* reason = QT_TR_NOOP("Couldn't extract native jar '%1' to destination '%2': %3");
             emit logLine(QString(reason).arg(source, outputPath, result.error()), MessageLevel::Fatal);

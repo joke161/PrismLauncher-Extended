@@ -392,6 +392,7 @@ QString MinecraftInstance::binRoot() const
 QString MinecraftInstance::getNativePath() const
 {
     QDir natives_dir(FS::PathCombine(instanceRoot(), "natives/"));
+    natives_dir.mkpath(".");
     return natives_dir.absolutePath();
 }
 
@@ -574,7 +575,25 @@ QStringList MinecraftInstance::getClassPath()
         }
     }
 
-    return resolvedJars;
+    bool is64Bit = (runtimeContext().javaArchitecture == "64" ||
+#if defined(Q_OS_WIN) && (defined(__x86_64__) || defined(_M_X64))
+                    true
+#else
+                    false
+#endif
+    );
+
+    QStringList filteredJars;
+    for (const auto& jar : resolvedJars) {
+        if (is64Bit && (jar.contains("natives-windows-x86", Qt::CaseInsensitive) ||
+                        jar.contains("natives-windows-32", Qt::CaseInsensitive) ||
+                        jar.contains("windows-x86-natives", Qt::CaseInsensitive))) {
+            continue;
+        }
+        filteredJars.append(jar);
+    }
+
+    return filteredJars;
 }
 
 QString MinecraftInstance::getMainClass() const
@@ -621,9 +640,41 @@ QString MinecraftInstance::getMainClass() const
 QStringList MinecraftInstance::getNativeJars()
 {
     QStringList jars, nativeJars;
-    auto profile = m_components->getProfile();
-    profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
-    return nativeJars;
+    auto profile = m_components ? m_components->getProfile() : nullptr;
+    if (profile) {
+        profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
+    }
+
+    bool is64Bit = (runtimeContext().javaArchitecture == "64" ||
+#if defined(Q_OS_WIN) && (defined(__x86_64__) || defined(_M_X64))
+                    true
+#else
+                    false
+#endif
+    );
+
+    for (const auto& j : jars) {
+        if (j.contains("natives-windows", Qt::CaseInsensitive) || j.contains("natives_windows", Qt::CaseInsensitive)) {
+            if (is64Bit && (j.contains("x86", Qt::CaseInsensitive) || j.contains("32", Qt::CaseInsensitive))) {
+                continue;
+            }
+            if (!nativeJars.contains(j)) {
+                nativeJars.append(j);
+            }
+        }
+    }
+
+    QStringList filteredNatives;
+    for (const auto& nj : nativeJars) {
+        if (is64Bit && (nj.contains("natives-windows-x86", Qt::CaseInsensitive) ||
+                        nj.contains("natives-windows-32", Qt::CaseInsensitive) ||
+                        nj.contains("windows-x86-natives", Qt::CaseInsensitive))) {
+            continue;
+        }
+        filteredNatives.append(nj);
+    }
+
+    return filteredNatives;
 }
 
 static QString replaceTokensIn(const QString& text, const QMap<QString, QString>& with)
@@ -775,6 +826,10 @@ QStringList MinecraftInstance::javaArguments()
         // allow reflective access to java.net - required by the skin fix
         args << "--add-opens" << "java.base/java.net=ALL-UNNAMED";
 
+    if (javaVersion.major() >= 25) {
+        args << "--enable-native-access=ALL-UNNAMED";
+    }
+
     return args;
 }
 
@@ -915,13 +970,38 @@ QStringList MinecraftInstance::processMinecraftArgs(AuthSessionPtr session, Mine
 
     // yggdrasil!
     if (session) {
-        // token_mapping["auth_username"] = session->username;
-        tokenMapping["auth_session"] = session->session;
-        tokenMapping["auth_access_token"] = session->access_token;
-        tokenMapping["auth_player_name"] = session->player_name;
-        tokenMapping["auth_uuid"] = session->uuid;
+        if (session->launchMode == LaunchMode::Offline || session->user_type == "offline") {
+            if (session->player_name.trimmed().isEmpty()) {
+                session->player_name = "Player";
+            }
+            if (session->uuid.trimmed().isEmpty()) {
+                session->uuid = MinecraftAccount::uuidFromUsername(session->player_name).toString(QUuid::Id128);
+            } else {
+                session->uuid = session->uuid.remove('-');
+            }
+            if (session->access_token.trimmed().isEmpty() || session->access_token == "offline_session_valid") {
+                session->access_token = "0";
+            }
+            if (session->session.trimmed().isEmpty() || session->session == "offline_session_valid") {
+                session->session = "0";
+            }
+            if (session->user_type.trimmed().isEmpty()) {
+                session->user_type = "offline";
+            }
+        }
+
+        QString safePlayerName = session->player_name.trimmed().isEmpty() ? "Player" : session->player_name.trimmed();
+        QString safeUuid = session->uuid.trimmed().isEmpty() ? MinecraftAccount::uuidFromUsername(safePlayerName).toString(QUuid::Id128) : session->uuid.remove('-');
+        QString safeAccessToken = session->access_token.trimmed().isEmpty() ? "0" : session->access_token;
+        QString safeSession = session->session.trimmed().isEmpty() ? "0" : session->session;
+        QString safeUserType = session->user_type.trimmed().isEmpty() ? "offline" : session->user_type;
+
+        tokenMapping["auth_session"] = safeSession;
+        tokenMapping["auth_access_token"] = safeAccessToken;
+        tokenMapping["auth_player_name"] = safePlayerName;
+        tokenMapping["auth_uuid"] = safeUuid;
         tokenMapping["user_properties"] = session->serializeUserProperties();
-        tokenMapping["user_type"] = session->user_type;
+        tokenMapping["user_type"] = safeUserType;
 
         if (session->launchMode == LaunchMode::Demo) {
             args << "--demo";
@@ -1335,14 +1415,11 @@ LaunchTask* MinecraftInstance::createLaunchTask(AuthSessionPtr session, Minecraf
         process->appendStep(step);
     }
 
-    // if we aren't in offline mode
     if (session->launchMode != LaunchMode::Offline) {
         process->appendStep(makeShared<ClaimAccount>(pptr, session));
-        for (auto t : createUpdateTask()) {
-            process->appendStep(makeShared<TaskStepWrapper>(pptr, t));
-        }
-    } else {
-        process->appendStep(makeShared<EnsureOfflineLibraries>(pptr, this));
+    }
+    for (auto t : createUpdateTask()) {
+        process->appendStep(makeShared<TaskStepWrapper>(pptr, t));
     }
 
     // if there are any jar mods

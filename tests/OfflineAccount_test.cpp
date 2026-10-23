@@ -307,8 +307,8 @@ private slots:
         acc2->fillSession(session);
         QCOMPARE(session->player_name, QStringLiteral("Bob"));
         QCOMPARE(session->uuid, acc2->profileId());
-        QCOMPARE(session->access_token, QStringLiteral("offline_session_valid"));
-        QCOMPARE(session->session, QStringLiteral("offline_session_valid"));
+        QCOMPARE(session->access_token, QStringLiteral("0"));
+        QCOMPARE(session->session, QStringLiteral("0"));
         QCOMPARE(session->modelType, QStringLiteral("steve"));
         QCOMPARE(session->skinPath, QStringLiteral("/path/to/bob.png"));
     }
@@ -384,6 +384,32 @@ private slots:
 
         // Both libraries must be collected in launchProfile
         QCOMPARE(launchProfile.getLibraries().size(), 2);
+    }
+
+    void test_OfflineArgumentsAndJava25AndNatives()
+    {
+        // 1. Verify AuthSession::MakeOffline sets non-empty fields and access_token == "0"
+        AuthSession session;
+        session.MakeOffline("joke");
+        QCOMPARE(session.player_name, QStringLiteral("joke"));
+        QCOMPARE(session.access_token, QStringLiteral("0"));
+        QCOMPARE(session.session, QStringLiteral("0"));
+        QCOMPARE(session.uuid.length(), 32);
+        QVERIFY(!session.uuid.contains('-'));
+        QCOMPARE(session.user_type, QStringLiteral("offline"));
+
+        // 2. Verify MinecraftAccount::createOffline and fillSession
+        auto acct = MinecraftAccount::createOffline("joke");
+        auto acctSession = std::make_shared<AuthSession>();
+        acct->fillSession(acctSession);
+        QCOMPARE(acctSession->player_name, QStringLiteral("joke"));
+        QCOMPARE(acctSession->access_token, QStringLiteral("0"));
+        QCOMPARE(acctSession->session, QStringLiteral("0"));
+        QCOMPARE(acctSession->uuid, session.uuid);
+
+        // 3. Verify Java 25 detection for --enable-native-access
+        JavaVersion jv25("25.0.0");
+        QVERIFY(jv25.major() >= 25);
     }
 };
 

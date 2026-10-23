@@ -112,8 +112,32 @@ void LauncherPartLaunch::executeTask()
         }
     }
 
+    if (m_session && (m_session->user_type == "offline" || m_session->launchMode == LaunchMode::Offline)) {
+        if (m_session->player_name.trimmed().isEmpty()) {
+            m_session->player_name = "Player";
+        }
+        if (m_session->uuid.trimmed().isEmpty()) {
+            m_session->uuid = MinecraftAccount::uuidFromUsername(m_session->player_name).toString(QUuid::Id128);
+        } else {
+            m_session->uuid = m_session->uuid.remove('-');
+        }
+        if (m_session->access_token.trimmed().isEmpty() || m_session->access_token == "offline_session_valid") {
+            m_session->access_token = "0";
+        }
+        if (m_session->session.trimmed().isEmpty() || m_session->session == "offline_session_valid") {
+            m_session->session = "0";
+        }
+        if (m_session->user_type.trimmed().isEmpty()) {
+            m_session->user_type = "offline";
+        }
+    }
+
     m_launchScript = instance->createLaunchScript(m_session, m_targetToJoin);
     QStringList args = instance->javaArguments();
+
+    if (instance->getJavaVersion().major() >= 25 && !args.contains("--enable-native-access=ALL-UNNAMED")) {
+        args << "--enable-native-access=ALL-UNNAMED";
+    }
 
     bool isP2PActive = (P2PManager::instance() &&
         (P2PManager::instance()->isConnected() ||
@@ -154,19 +178,27 @@ void LauncherPartLaunch::executeTask()
             // Ensure mandatory Minecraft command line parameters for offline account:
             // --username <имя_оффлайн_аккаунта>
             // --uuid <стабильный_оффлайн_UUID>
-            // --accessToken offline_session_valid
-            if (!m_launchScript.contains("param --username")) {
+            // --accessToken 0
+            if (m_launchScript.contains("param --username\nparam \n")) {
+                m_launchScript.replace("param --username\nparam \n", QString("param --username\nparam %1\n").arg(m_session->player_name));
+            } else if (!m_launchScript.contains("param --username")) {
                 m_launchScript += QString("param --username\nparam %1\n").arg(m_session->player_name);
             }
-            if (!m_launchScript.contains("param --uuid")) {
+
+            if (m_launchScript.contains("param --uuid\nparam \n")) {
+                m_launchScript.replace("param --uuid\nparam \n", QString("param --uuid\nparam %1\n").arg(m_session->uuid));
+            } else if (!m_launchScript.contains("param --uuid")) {
                 m_launchScript += QString("param --uuid\nparam %1\n").arg(m_session->uuid);
             }
-            if (!m_launchScript.contains("param --accessToken")) {
-                m_launchScript += "param --accessToken\nparam offline_session_valid\n";
-            } else {
-                m_launchScript.replace("param --accessToken\nparam \n", "param --accessToken\nparam offline_session_valid\n");
-                m_launchScript.replace("param --accessToken\nparam null\n", "param --accessToken\nparam offline_session_valid\n");
-                m_launchScript.replace("param --accessToken\nparam 0\n", "param --accessToken\nparam offline_session_valid\n");
+
+            if (m_launchScript.contains("param --accessToken\nparam \n") ||
+                m_launchScript.contains("param --accessToken\nparam null\n") ||
+                m_launchScript.contains("param --accessToken\nparam offline_session_valid\n")) {
+                m_launchScript.replace("param --accessToken\nparam \n", "param --accessToken\nparam 0\n");
+                m_launchScript.replace("param --accessToken\nparam null\n", "param --accessToken\nparam 0\n");
+                m_launchScript.replace("param --accessToken\nparam offline_session_valid\n", "param --accessToken\nparam 0\n");
+            } else if (!m_launchScript.contains("param --accessToken")) {
+                m_launchScript += "param --accessToken\nparam 0\n";
             }
         }
 
@@ -199,6 +231,7 @@ void LauncherPartLaunch::executeTask()
     }
 
     auto natPath = instance->getNativePath();
+    QDir().mkpath(natPath);
 #ifdef Q_OS_WIN
     natPath = FS::getPathNameInLocal8bit(natPath);
 #endif

@@ -88,6 +88,12 @@ void Library::getApplicableFiles(const RuntimeContext& runtimeContext,
             native += actualPath(raw_storage);
         }
     } else {
+        if (runtimeContext.javaArchitecture == "64" &&
+            (raw_storage.contains("natives-windows-x86", Qt::CaseInsensitive) ||
+             raw_storage.contains("natives-windows-32", Qt::CaseInsensitive) ||
+             raw_storage.contains("windows-x86-natives", Qt::CaseInsensitive))) {
+            return;
+        }
         jar += actualPath(raw_storage);
     }
 }

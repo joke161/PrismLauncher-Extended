@@ -448,6 +448,10 @@ void LocalSkinServer::handleHttpRequest(QTcpSocket* socket, const QString& reque
         }
         QString cleanId = uuidStr;
         cleanId.remove('-');
+        if (cleanId == "00000000000000000000000000000000" || cleanId.isEmpty()) {
+            sendHttpResponse(socket, 204, "No Content", "application/json", QByteArray(), closeConnection);
+            return;
+        }
         QUrl mojangUrl(QStringLiteral("https://sessionserver.mojang.com/session/minecraft/profile/%1?unsigned=false").arg(cleanId));
         QNetworkRequest req(mojangUrl);
         QNetworkReply* reply = m_networkManager->get(req);

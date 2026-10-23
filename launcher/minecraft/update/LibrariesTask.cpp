@@ -13,12 +13,6 @@ LibrariesTask::LibrariesTask(MinecraftInstance* inst)
 void LibrariesTask::executeTask()
 {
     MinecraftInstance* inst = (MinecraftInstance*)m_inst;
-    if (inst && inst->isOfflineLaunch()) {
-        qDebug() << m_inst->name() << ": offline launch mode, skipping library downloads";
-        emitSucceeded();
-        return;
-    }
-
     setStatus(tr("Downloading required library files..."));
     qDebug() << m_inst->name() << ": downloading libraries";
 

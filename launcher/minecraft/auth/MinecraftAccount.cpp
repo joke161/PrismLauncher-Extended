@@ -271,29 +271,41 @@ bool MinecraftAccount::shouldRefresh() const
 void MinecraftAccount::fillSession(AuthSessionPtr session)
 {
     // profile name
-    session->player_name = data.profileName();
+    session->player_name = data.profileName().trimmed();
+    if (session->player_name.isEmpty()) {
+        session->player_name = "Player";
+    }
 
     // profile ID and tokens
-    if (data.type == AccountType::Offline) {
-        session->uuid = uuidFromUsername(session->player_name).toString(QUuid::Id128);
-        session->access_token = "offline_session_valid";
-        session->session = "offline_session_valid";
-    } else {
-        session->uuid = data.profileId();
+    if (data.type == AccountType::Offline || session->launchMode == LaunchMode::Offline) {
+        if (!data.profileId().isEmpty()) {
+            session->uuid = data.profileId().remove('-');
+        } else {
+            session->uuid = uuidFromUsername(session->player_name).toString(QUuid::Id128);
+        }
         if (session->uuid.isEmpty()) {
             session->uuid = uuidFromUsername(session->player_name).toString(QUuid::Id128);
         }
-        session->access_token = data.accessToken();
-        if (!session->access_token.isEmpty()) {
+        session->access_token = "0";
+        session->session = "0";
+        session->user_type = "offline";
+        session->launchMode = LaunchMode::Offline;
+    } else {
+        session->uuid = data.profileId().remove('-');
+        if (session->uuid.isEmpty()) {
+            session->uuid = uuidFromUsername(session->player_name).toString(QUuid::Id128);
+        }
+        session->access_token = data.accessToken().isEmpty() ? "0" : data.accessToken();
+        if (!data.accessToken().isEmpty()) {
             session->session = "token:" + data.accessToken() + ":" + data.profileId();
         } else {
-            session->session = "-";
+            session->session = "0";
         }
     }
 
     session->skinPath = data.skinPath;
     session->modelType = data.modelType.isEmpty() ? "steve" : data.modelType;
-    session->user_type = typeString();
+    session->user_type = typeString().isEmpty() ? "offline" : typeString();
 }
 
 void MinecraftAccount::decrementUses()
